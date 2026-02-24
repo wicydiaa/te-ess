@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QTextEdit, QLineEdit, QPushButton, QSlider, QLabel,
                              QDialog, QColorDialog, QFrame, QButtonGroup, QComboBox,
                              QInputDialog, QMessageBox, QSpinBox)
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QPoint, QThread, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from google import genai
@@ -222,6 +222,38 @@ class SettingsDialog(QDialog):
         )
         self.accept()
 
+# --- Streaming Worker ---
+class ChatWorker(QThread):
+    chunk_received = pyqtSignal(str)
+    finished = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, client, model_name, contents, config):
+        super().__init__()
+        self.client = client
+        self.model_name = model_name
+        self.contents = contents
+        self.config = config
+
+    def run(self):
+        import time
+        try:
+            full_response = ""
+            for chunk in self.client.models.generate_content_stream(
+                model=self.model_name,
+                contents=self.contents,
+                config=self.config
+            ):
+                if chunk.text:
+                    # Daha akıcı bir "yazma" efekti için küçük bir gecikme
+                    for char in chunk.text:
+                        self.chunk_received.emit(char)
+                        time.sleep(0.01)
+                    full_response += chunk.text
+            self.finished.emit(full_response)
+        except Exception as e:
+            self.error.emit(str(e))
+
 # --- ANA PENCERE SINIFI ---
 class GeminiSidebar(QWidget):
     def __init__(self):
@@ -285,8 +317,7 @@ class GeminiSidebar(QWidget):
                 if self.isVisible():
                     self.hide()
                 else:
-                    self.showNormal()
-                    self.activateWindow()
+                    self.animate_show()
         socket.disconnectFromServer()
 
     def load_config(self):
@@ -344,6 +375,19 @@ class GeminiSidebar(QWidget):
         self.position_on_left()
         self.apply_styles()
         self.save_config()
+
+    def animate_show(self):
+        self.show()
+        self.showNormal()
+        self.activateWindow()
+
+        # Animasyon: Soldan sağa kayarak gelme
+        self.animation = QPropertyAnimation(self, b"pos")
+        self.animation.setDuration(400)
+        self.animation.setStartValue(QPoint(-self.width(), self.pos().y()))
+        self.animation.setEndValue(QPoint(self.last_x, self.last_y))
+        self.animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.animation.start()
 
     def open_settings(self):
         self.settings_dialog = SettingsDialog(self, self.bg_alpha, self.bg_color, self.accent_color, self.app_width, self.app_height)
@@ -487,23 +531,53 @@ class GeminiSidebar(QWidget):
         if not active_api_data["key"]:
             self.chat_history.append("<b>Sistem:</b> Lütfen API anahtarı girin.<br>")
             return
+
         accent_hex = self.accent_color.name()
         self.chat_history.append(f"<b style='color:{accent_hex};'>Sen:</b> {user_text}<br>")
         self.input_field.clear()
-        QApplication.processEvents()
+
+        # "Düşünüyor..." durumunu başlat
+        self.chat_history.append(f"<b style='color:{accent_hex};'>Gemini:</b><br><i id='thinking'>Düşünüyor...</i>")
+        self.chat_history.verticalScrollBar().setValue(self.chat_history.verticalScrollBar().maximum())
+
+        self.current_ai_response = ""
         temp = 0.2 if self.current_mode == "Precise" else 1.5 if self.current_mode == "Creative" else 0.7
+
         try:
             client = genai.Client(api_key=active_api_data["key"])
-            response = client.models.generate_content(
-                model='gemini-2.0-flash', # Model ismini güncelledim
-                contents=user_text,
-                config=types.GenerateContentConfig(temperature=temp, system_instruction=self.personas[self.current_persona])
-            )
-            html_response = markdown.markdown(response.text)
-            self.chat_history.append(f"<b style='color:{accent_hex};'>Gemini:</b><br>{html_response}<br><br>")
-            self.chat_history.verticalScrollBar().setValue(self.chat_history.verticalScrollBar().maximum())
+            config = types.GenerateContentConfig(temperature=temp, system_instruction=self.personas[self.current_persona])
+
+            self.worker = ChatWorker(client, 'gemini-2.5-flash', user_text, config)
+            self.worker.chunk_received.connect(self.on_chunk_received)
+            self.worker.finished.connect(self.on_response_finished)
+            self.worker.error.connect(self.on_worker_error)
+            self.worker.start()
         except Exception as e:
             self.chat_history.append(f"<b>Hata:</b> {str(e)}<br><br>")
+
+    def on_chunk_received(self, chunk):
+        if not self.current_ai_response:
+            # "Düşünüyor..." yazısını sil
+            cursor = self.chat_history.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            cursor.select(cursor.SelectionType.BlockUnderCursor)
+            cursor.removeSelectedText()
+            self.chat_history.append(f"<b style='color:{self.accent_color.name()};'>Gemini:</b><br>")
+
+        self.current_ai_response += chunk
+        cursor = self.chat_history.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        cursor.insertText(chunk)
+        self.chat_history.verticalScrollBar().setValue(self.chat_history.verticalScrollBar().maximum())
+
+    def on_response_finished(self, full_text):
+        # Yanıt tamamlandığında markdown formatına çevirip güzelleştirme yapılabilir
+        # Ama streaming bittiğinde zaten ekranda düz metin olarak var.
+        self.chat_history.append("<br>")
+        self.chat_history.verticalScrollBar().setValue(self.chat_history.verticalScrollBar().maximum())
+
+    def on_worker_error(self, error_msg):
+        self.chat_history.append(f"<b>Hata:</b> {error_msg}<br><br>")
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
@@ -520,5 +594,5 @@ if __name__ == '__main__':
         ex = GeminiSidebar()
         ex.server.removeServer(socket_name)
         ex.server.listen(socket_name)
-        ex.show()
+        ex.animate_show()
         sys.exit(app.exec())
