@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QTextEdit, QLineEdit, QPushButton, QSlider, QLabel,
                              QDialog, QColorDialog, QFrame, QButtonGroup, QComboBox,
                              QInputDialog, QMessageBox, QSpinBox)
-from PyQt6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QPoint, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QPoint, QRect, QThread, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from google import genai
@@ -258,6 +258,7 @@ class ChatWorker(QThread):
 class GeminiSidebar(QWidget):
     def __init__(self):
         super().__init__()
+        self._is_init = True # Açılışta konumun ezilmesini önlemek için
         self.bg_alpha = 230
         self.bg_color = QColor(20, 20, 20)
         self.accent_color = QColor("#ff80ab")
@@ -285,7 +286,6 @@ class GeminiSidebar(QWidget):
         self.server.newConnection.connect(self.handle_connection)
 
         self.initUI()
-        self.position_on_left()
 
         # Thinking Animation Timer
         self.thinking_dots = 0
@@ -299,7 +299,7 @@ class GeminiSidebar(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
-            # Wayland'de startSystemMove daha sağlıklı çalışır
+            # Wayland'de startSystemMove en sağlıklı yöntemdir
             if self.windowHandle():
                 self.windowHandle().startSystemMove()
             else:
@@ -315,9 +315,12 @@ class GeminiSidebar(QWidget):
 
     def moveEvent(self, event):
         super().moveEvent(event)
-        self.last_x = self.pos().x()
-        self.last_y = self.pos().y()
-        self.save_timer.start(1000) # 1 saniye sonra kaydet
+        # Açılış sırasında compositor'un rastgele atamalarını kaydetmemek için
+        if not hasattr(self, '_is_init') or not self._is_init:
+            pos = self.frameGeometry().topLeft()
+            self.last_x = pos.x()
+            self.last_y = pos.y()
+            self.save_timer.start(1000)
 
     def mouseReleaseEvent(self, event):
         self.save_config()
@@ -325,8 +328,7 @@ class GeminiSidebar(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        # Wayland'de pencere oluşmadan konumlandırma bazen başarısız olur
-        QTimer.singleShot(100, self.position_on_left)
+        # Animasyon kullanıldığı için buradaki snap timer'ı kaldırıldı
 
     def handle_connection(self):
         socket = self.server.nextPendingConnection()
@@ -393,25 +395,36 @@ class GeminiSidebar(QWidget):
         self.save_config()
 
     def animate_show(self):
+        self._is_init = True
         self.setWindowOpacity(0.0)
-        self.setGeometry(self.last_x - 50, self.last_y, self.app_width, self.app_height)
+        # Wayland'de genişlik animasyonu çok daha güvenilirdir
+        self.setGeometry(self.last_x, self.last_y, 0, self.app_height)
         self.show()
         self.showNormal()
         self.activateWindow()
 
-        self.pos_anim = QPropertyAnimation(self, b"pos")
-        self.pos_anim.setDuration(400)
-        self.pos_anim.setStartValue(QPoint(self.last_x - 50, self.last_y))
-        self.pos_anim.setEndValue(QPoint(self.last_x, self.last_y))
-        self.pos_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        # Animasyon 1: Boyut (Soldan sağa genişleme)
+        self.width_anim = QPropertyAnimation(self, b"geometry")
+        self.width_anim.setDuration(500)
+        self.width_anim.setStartValue(QRect(self.last_x, self.last_y, 0, self.app_height))
+        self.width_anim.setEndValue(QRect(self.last_x, self.last_y, self.app_width, self.app_height))
+        self.width_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
+        # Animasyon 2: Şeffaflık (Belirme)
         self.opacity_anim = QPropertyAnimation(self, b"windowOpacity")
-        self.opacity_anim.setDuration(400)
+        self.opacity_anim.setDuration(500)
         self.opacity_anim.setStartValue(0.0)
         self.opacity_anim.setEndValue(1.0)
 
-        self.pos_anim.start()
+        self.width_anim.finished.connect(self._on_animated_show_finished)
+
+        self.width_anim.start()
         self.opacity_anim.start()
+
+    def _on_animated_show_finished(self):
+        self._is_init = False
+        # Konumu son kez sabitle
+        self.setGeometry(self.last_x, self.last_y, self.app_width, self.app_height)
 
     def open_settings(self):
         self.settings_dialog = SettingsDialog(self, self.bg_alpha, self.bg_color, self.accent_color, self.app_width, self.app_height)
@@ -561,8 +574,8 @@ class GeminiSidebar(QWidget):
         self.input_field.clear()
 
         # "Düşünüyor..." durumunu ve animasyonu başlat
-        self.chat_history.append(f"<b style='color:{accent_hex};'>Gemini:</b><br>")
-        self.chat_history.insertHtml("<i>Düşünüyor...</i>")
+        self.chat_history.append(f"<b style='color:{accent_hex};'>Gemini:</b>")
+        self.chat_history.append("<i>Düşünüyor...</i>")
         self.thinking_dots = 3
         self.thinking_timer.start(500)
         self.chat_history.verticalScrollBar().setValue(self.chat_history.verticalScrollBar().maximum())
@@ -592,8 +605,6 @@ class GeminiSidebar(QWidget):
             cursor.movePosition(cursor.MoveOperation.End)
             cursor.select(cursor.SelectionType.BlockUnderCursor)
             cursor.removeSelectedText()
-            # Gemini ismini zaten yazmıştık, sadece altına geçiyoruz
-            self.chat_history.insertHtml("<br>")
 
         self.current_ai_response += char
         # Markdown render et ve göster
