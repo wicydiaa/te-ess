@@ -304,21 +304,22 @@ class GeminiSidebar(QWidget):
             except Exception as e:
                 print("Ayar dosyası okunamadı:", e)
         else:
+            screen = QApplication.primaryScreen().availableGeometry()
             self.last_x = 0
-            self.last_y = 100
+            self.last_y = (screen.height() - self.app_height) // 2
 
     def save_config(self):
+        self.last_x = self.pos().x()
+        self.last_y = self.pos().y()
         data = {
             "bg_alpha": self.bg_alpha,
             "bg_color": self.bg_color.name(),
             "accent_color": self.accent_color.name(),
-            "app_width": self.app_width,
-            "app_height": self.app_height,
             "active_api_profile": self.active_api_profile,
             "api_profiles": self.api_profiles,
             "current_persona": self.current_persona,
-            "last_x": self.pos().x(),
-            "last_y": self.pos().y(),
+            "last_x": self.last_x,
+            "last_y": self.last_y,
             "app_width": self.width(),
             "app_height": self.height(),
         }
@@ -326,14 +327,9 @@ class GeminiSidebar(QWidget):
             json.dump(data, f, indent=4)
 
     def position_on_left(self):
-        # Kayıtlı pozisyona git
-        self.move(self.last_x, self.last_y)
-        screen = QApplication.primaryScreen().availableGeometry()
+        # Kayıtlı pozisyona git (Hafıza özelliği)
         self.setFixedSize(self.app_width, self.app_height)
-        x = 0
-        y = (screen.height() - self.app_height) // 2
-        self.move(x, y)
-        self.setGeometry(x, y, self.app_width, self.app_height)
+        self.move(self.last_x, self.last_y)
 
     def update_settings(self, alpha, bg_color, accent_color, width, height):
         self.bg_alpha = alpha
@@ -495,7 +491,7 @@ class GeminiSidebar(QWidget):
         try:
             client = genai.Client(api_key=active_api_data["key"])
             response = client.models.generate_content(
-                model='gemini-2.5-flash', # Model ismini güncelledim
+                model='gemini-2.0-flash', # Model ismini güncelledim
                 contents=user_text,
                 config=types.GenerateContentConfig(temperature=temp, system_instruction=self.personas[self.current_persona])
             )
