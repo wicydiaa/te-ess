@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QTextEdit, QLineEdit, QPushButton, QSlider, QLabel,
                              QDialog, QColorDialog, QFrame, QButtonGroup, QComboBox,
                              QInputDialog, QMessageBox, QSpinBox)
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from google import genai
@@ -272,6 +272,11 @@ class GeminiSidebar(QWidget):
         self.save_config()
         event.accept()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Wayland'de pencere oluşmadan konumlandırma bazen başarısız olur, gecikme ekliyoruz
+        QTimer.singleShot(100, self.position_on_left)
+
     def handle_connection(self):
         socket = self.server.nextPendingConnection()
         if socket.waitForReadyRead(500):
@@ -282,7 +287,6 @@ class GeminiSidebar(QWidget):
                 else:
                     self.showNormal()
                     self.activateWindow()
-                    self.position_on_left()
         socket.disconnectFromServer()
 
     def load_config(self):
@@ -517,5 +521,4 @@ if __name__ == '__main__':
         ex.server.removeServer(socket_name)
         ex.server.listen(socket_name)
         ex.show()
-        ex.position_on_left()
         sys.exit(app.exec())
