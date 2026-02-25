@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QDialog, QColorDialog, QFrame, QButtonGroup, QComboBox,
                              QInputDialog, QMessageBox, QSpinBox)
 from PyQt6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, QPoint, QRect, QThread, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QTextCursor
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from google import genai
 from google.genai import types
@@ -259,6 +259,7 @@ class GeminiSidebar(QWidget):
     def __init__(self):
         super().__init__()
         self._is_init = True # Açılışta konumun ezilmesini önlemek için
+        self._is_dragging = False # Dragging sırasında konum kaydı için
         self.bg_alpha = 230
         self.bg_color = QColor(20, 20, 20)
         self.accent_color = QColor("#ff80ab")
@@ -300,6 +301,7 @@ class GeminiSidebar(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
+            self._is_dragging = True
             # Wayland'de startSystemMove en sağlıklı yöntemdir
             if self.windowHandle():
                 self.windowHandle().startSystemMove()
@@ -316,13 +318,14 @@ class GeminiSidebar(QWidget):
 
     def moveEvent(self, event):
         super().moveEvent(event)
-        # Açılış veya animasyon sırasında kaydedilen hatalı konumları engelle
-        if not self._is_init:
+        # Sadece kullanıcı sürüklerken konumu güncelle
+        if self._is_dragging and not self._is_init:
             self.last_x = self.x()
             self.last_y = self.y()
             self.save_timer.start(500)
 
     def mouseReleaseEvent(self, event):
+        self._is_dragging = False
         self.save_config()
         event.accept()
 
@@ -427,8 +430,9 @@ class GeminiSidebar(QWidget):
 
     def _on_animated_show_finished(self):
         self._is_init = False
-        # Konumu son kez sabitle
+        # Konumu son kez sabitle (Wayland için zorla)
         self.setGeometry(self.last_x, self.last_y, self.app_width, self.app_height)
+        QTimer.singleShot(100, lambda: self.move(self.last_x, self.last_y))
 
     def open_settings(self):
         self.settings_dialog = SettingsDialog(self, self.bg_alpha, self.bg_color, self.accent_color, self.app_width, self.app_height)
@@ -455,7 +459,7 @@ class GeminiSidebar(QWidget):
         """
 
     def initUI(self):
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.resize(self.app_width, self.app_height)
 
@@ -535,6 +539,12 @@ class GeminiSidebar(QWidget):
         # Sohbet ve Girdi
         self.chat_history = QTextEdit()
         self.chat_history.setReadOnly(True)
+
+        # Thinking Label
+        self.thinking_label = QLabel("⠋ Gemini çalışıyor...")
+        self.thinking_label.setStyleSheet(f"color: {self.accent_color.name()}; font-style: italic; margin-left: 5px;")
+        self.thinking_label.hide()
+
         self.input_field = QLineEdit()
         self.input_field.setPlaceholderText("Message Gemini...")
         self.input_field.returnPressed.connect(self.send_message)
@@ -544,6 +554,7 @@ class GeminiSidebar(QWidget):
         main_layout.addLayout(mode_layout)
         main_layout.addWidget(line)
         main_layout.addWidget(self.chat_history)
+        main_layout.addWidget(self.thinking_label)
         main_layout.addWidget(self.input_field)
 
         self.apply_styles()
@@ -577,15 +588,10 @@ class GeminiSidebar(QWidget):
         self.chat_history.append(f"<b style='color:{accent_hex};'>Sen:</b> {user_text}<br>")
         self.input_field.clear()
 
-        # "Düşünüyor..." durumunu ve animasyonu başlat
-        self.chat_history.append(f"<b style='color:{accent_hex};'>Gemini:</b>")
-        # Thinking indicator'ı ayrı bir append ile değil, header'ın hemen altına ama kontrollü ekleyelim
-        cursor = self.chat_history.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        cursor.insertHtml("<div id='thinking'><i>⠋ Gemini çalışıyor...</i></div>")
-
+        # Thinking Animation başlat
+        self.thinking_label.show()
         self.thinking_dots = 0
-        self.thinking_timer.start(100) # Daha hızlı animasyon
+        self.thinking_timer.start(100)
         self.chat_history.verticalScrollBar().setValue(self.chat_history.verticalScrollBar().maximum())
 
         self.current_ai_response = ""
@@ -605,17 +611,15 @@ class GeminiSidebar(QWidget):
 
     def on_chunk_received(self, char):
         if not self.current_ai_response:
-            # "Düşünüyor..." animasyonunu durdur ve sil
+            # Thinking animasyonunu durdur
             if self.thinking_timer.isActive():
                 self.thinking_timer.stop()
+            self.thinking_label.hide()
 
-            # Son bloğu (Thinking) sil
-            cursor = self.chat_history.textCursor()
-            cursor.movePosition(cursor.MoveOperation.End)
-            cursor.select(cursor.SelectionType.BlockUnderCursor)
-            cursor.removeSelectedText()
-            # Header'ın altına geçmek için bir newline (isteğe bağlı, zaten header block oluşturur)
-            cursor.insertHtml("<br>")
+            # Gemini header'ını şimdi ekle (streaming başlangıcında)
+            self.chat_history.append(f"<b style='color:{self.accent_color.name()};'>Gemini:</b>")
+            self.chat_history.append("") # Mesaj için boş satır
+            self.response_start_pos = self.chat_history.textCursor().position()
 
         self.current_ai_response += char
         # Markdown render et ve göster
@@ -632,16 +636,15 @@ class GeminiSidebar(QWidget):
         self.chat_history.verticalScrollBar().setValue(self.chat_history.verticalScrollBar().maximum())
 
     def on_response_finished(self, full_text):
-        # Yanıt bittiğinde her şeyi markdown olarak tekrar yaz
-        # Bu, formatting'in (bold, code vb.) düzelmesini sağlar.
         html_response = markdown.markdown(full_text)
 
-        # Stream sırasında eklenen düz metni silip yerine render edilmiş markdown ekle
+        # Streaming sırasında eklenen metni tam olarak seçip sil
         cursor = self.chat_history.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        cursor.select(cursor.SelectionType.BlockUnderCursor)
+        cursor.setPosition(self.response_start_pos)
+        cursor.movePosition(cursor.MoveOperation.End, cursor.MoveMode.KeepAnchor)
         cursor.removeSelectedText()
 
+        # Markdown halini ekle
         cursor.insertHtml(html_response)
         self.chat_history.append("<br>")
         self.chat_history.verticalScrollBar().setValue(self.chat_history.verticalScrollBar().maximum())
@@ -654,12 +657,7 @@ class GeminiSidebar(QWidget):
     def update_thinking_animation(self):
         self.thinking_dots = (self.thinking_dots + 1) % len(self.thinking_icons)
         icon = self.thinking_icons[self.thinking_dots]
-        # Son bloğu seçip simgeyi güncelle
-        cursor = self.chat_history.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        cursor.select(cursor.SelectionType.BlockUnderCursor)
-        cursor.removeSelectedText()
-        cursor.insertHtml(f"<i>{icon} Gemini çalışıyor...</i>")
+        self.thinking_label.setText(f"{icon} Gemini çalışıyor...")
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
@@ -676,5 +674,5 @@ if __name__ == '__main__':
         ex = GeminiSidebar()
         ex.server.removeServer(socket_name)
         ex.server.listen(socket_name)
-        ex.animate_show()
+        # ex.animate_show() # Başlangıçta gizli kalsın
         sys.exit(app.exec())
